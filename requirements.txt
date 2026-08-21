@@ -1,0 +1,8 @@
+streamlit
+pymupdf
+openai
+python-docx
+pillow
+google-genai
+tenacity
+pandas

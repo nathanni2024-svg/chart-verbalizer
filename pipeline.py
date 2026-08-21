@@ -1,0 +1,179 @@
+import fitz  # PyMuPDF
+import io
+import json
+import base64
+import os
+from PIL import Image
+from openai import OpenAI
+from google import genai
+from docx import Document
+from docx.shared import Inches, Pt, RGBColor
+
+def extract_images_from_pdf(pdf_bytes):
+    """从上传的 PDF 字节流中提取所有图片（含矢量图页面渲染）"""
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    extracted_images = []
+    
+    for page_idx, page in enumerate(doc):
+        # 1. 尝试提取内嵌的位图图片
+        image_list = page.get_images(full=True)
+        page_has_raster = False
+        
+        for img_idx, img_meta in enumerate(image_list):
+            xref = img_meta[0]
+            base_image = doc.extract_image(xref)
+            image_bytes = base_image["image"]
+            image_ext = base_image["ext"]
+            
+            image = Image.open(io.BytesIO(image_bytes))
+            if image.width > 150 and image.height > 150:
+                extracted_images.append({
+                    "page": page_idx + 1,
+                    "index": img_idx + 1,
+                    "bytes": image_bytes,
+                    "format": image_ext,
+                    "image_obj": image,
+                    "is_full_page": False
+                })
+                page_has_raster = True
+                
+        # 2. 兜底机制：如果页面中没有内嵌位图，但页面中含有图表关键字
+        if not page_has_raster:
+            text = page.get_text().lower()
+            if any(kw in text for kw in ["figure", "fig.", "图", "scatterplot", "bar chart", "histogram", "boxplot"]):
+                # 渲染页面为高分辨率图片 (2.0 倍缩放，确保大模型能看清字)
+                pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
+                image_bytes = pix.tobytes("png")
+                image = Image.open(io.BytesIO(image_bytes))
+                extracted_images.append({
+                    "page": page_idx + 1,
+                    "index": 1,
+                    "bytes": image_bytes,
+                    "format": "png",
+                    "image_obj": image,
+                    "is_full_page": True
+                })
+                
+    return extracted_images
+
+def analyze_chart_accessibility(image_bytes, is_full_page=False):
+    """调用大模型（OpenAI GPT-4o 或 Google Gemini 2.5 Flash）提取学术图表的无障碍要素与数据表格"""
+    api_key = os.environ.get("OPENAI_API_KEY")
+    
+    system_prompt = """你是一位数字无障碍与信息架构专家。请严格以 JSON 格式输出以下字段，不要附带 Markdown 标记：
+{
+  "alt_text": "50字以内的单句描述，说明图表类型与核心主题",
+  "trend_summary": "150字以内的学术趋势、极值、关键拐点分析",
+  "table_headers": ["列名1", "列名2", "列名3"],
+  "table_rows": [
+    ["数据1", "数据2", "数据3"],
+    ["数据4", "数据5", "数据6"]
+  ]
+}"""
+
+    user_text = "请解析这张学术图表，提取全部数据并重构为无障碍语义结构。"
+    if is_full_page:
+        user_text = "这张图片是包含文字的完整学术论文页面。请忽略正文文字，自动定位到页面中的图表（如散点图、直方图或箱线图），提取该图表的全部数据并重构为无障碍语义结构。"
+
+    # 判断 API Key 的类型
+    is_gemini_key = api_key and (api_key.startswith("AQ.") or api_key.startswith("AIza"))
+    
+    if is_gemini_key:
+        client = genai.Client(api_key=api_key)
+        image = Image.open(io.BytesIO(image_bytes))
+        
+        from tenacity import retry, stop_after_attempt, wait_exponential
+        
+        @retry(
+            stop=stop_after_attempt(5),
+            wait=wait_exponential(multiplier=2, min=2, max=15),
+            reraise=True
+        )
+        def _call_gemini_with_retry():
+            return client.models.generate_content(
+                model='gemini-flash-latest',
+                contents=[user_text, image],
+                config=dict(
+                    system_instruction=system_prompt,
+                    response_mime_type="application/json"
+                )
+            )
+            
+        response = _call_gemini_with_retry()
+        return json.loads(response.text)
+    else:
+        client = OpenAI(api_key=api_key)
+        base64_img = base64.b64encode(image_bytes).decode('utf-8')
+        
+        from tenacity import retry, stop_after_attempt, wait_exponential
+        
+        @retry(
+            stop=stop_after_attempt(3),
+            wait=wait_exponential(multiplier=1, min=2, max=10),
+            reraise=True
+        )
+        def _call_openai_with_retry():
+            return client.chat.completions.create(
+                model="gpt-4o",
+                response_format={"type": "json_object"},
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": [
+                        {"type": "text", "text": user_text},
+                        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{base64_img}"}}
+                    ]}
+                ]
+            )
+            
+        response = _call_openai_with_retry()
+        return json.loads(response.choices[0].message.content)
+
+def create_accessible_docx(processed_charts):
+    """构建符合无障碍规范的 Word 文档"""
+    doc = Document()
+    
+    # 标题
+    title = doc.add_heading("学术文献图表无障碍转译报告", level=1)
+    
+    for idx, item in enumerate(processed_charts):
+        doc.add_heading(f"图表 {idx + 1}（源自 PDF 第 {item['page']} 页）", level=2)
+        
+        # 1. 插入图片
+        img_stream = io.BytesIO(item['bytes'])
+        doc.add_picture(img_stream, width=Inches(4.5))
+        
+        # 2. 替代文本标签
+        p_alt = doc.add_paragraph()
+        p_alt_run = p_alt.add_run(f"【Alt Text / 读屏替代文本】: {item['data']['alt_text']}")
+        p_alt_run.font.size = Pt(9.5)
+        p_alt_run.font.italic = True
+        p_alt_run.font.color.rgb = RGBColor(100, 100, 100)
+        
+        # 3. 趋势概括
+        doc.add_heading("核心数据趋势", level=3)
+        doc.add_paragraph(item['data']['trend_summary'])
+        
+        # 4. 语义化数据表格（供 NVDA/JAWS 遍历）
+        doc.add_heading("图表原始数据还原表", level=3)
+        headers = item['data']['table_headers']
+        rows = item['data']['table_rows']
+        
+        table = doc.add_table(rows=1 + len(rows), cols=len(headers))
+        table.style = 'Light Shading Accent 1'
+        
+        # 填充表头
+        for col_idx, header_text in enumerate(headers):
+            cell = table.cell(0, col_idx)
+            cell.text = str(header_text)
+            
+        # 填充数据行
+        for row_idx, row_data in enumerate(rows):
+            for col_idx, val in enumerate(row_data):
+                table.cell(row_idx + 1, col_idx).text = str(val)
+                
+        doc.add_paragraph() # 空行分隔
+        
+    output_stream = io.BytesIO()
+    doc.save(output_stream)
+    output_stream.seek(0)
+    return output_stream
