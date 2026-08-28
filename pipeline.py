@@ -56,24 +56,25 @@ def extract_images_from_pdf(pdf_bytes):
                 
     return extracted_images
 
-def analyze_chart_accessibility(image_bytes, is_full_page=False):
+def analyze_chart_accessibility(image_bytes, is_full_page=False, language="简体中文"):
     """调用大模型（OpenAI GPT-4o 或 Google Gemini 2.5 Flash）提取学术图表的无障碍要素与数据表格"""
     api_key = os.environ.get("OPENAI_API_KEY")
     
-    system_prompt = """你是一位数字无障碍与信息架构专家。请严格以 JSON 格式输出以下字段，不要附带 Markdown 标记：
-{
-  "alt_text": "50字以内的单句描述，说明图表类型与核心主题",
-  "trend_summary": "150字以内的学术趋势、极值、关键拐点分析",
-  "table_headers": ["列名1", "列名2", "列名3"],
+    system_prompt = f"""You are a digital accessibility and information architecture expert. 
+Please analyze the academic chart and output a JSON object in the following format (no markdown code blocks):
+{{
+  "alt_text": "Single-sentence description explaining the chart type and core subject (under 50 words), written in {language}.",
+  "trend_summary": "Analysis of academic trends, extreme values, and key inflection points (under 150 words), written in {language}.",
+  "table_headers": ["Column 1", "Column 2", ... (Headers translated or written in {language})],
   "table_rows": [
-    ["数据1", "数据2", "数据3"],
-    ["数据4", "数据5", "数据6"]
+    ["Data 1", "Data 2", ...],
+    ["Data 3", "Data 4", ...]
   ]
-}"""
+}}"""
 
-    user_text = "请解析这张学术图表，提取全部数据并重构为无障碍语义结构。"
+    user_text = f"Please analyze this academic chart, extract all data, and reconstruct it into an accessible semantic structure. Output all textual descriptions and table headers in {language}."
     if is_full_page:
-        user_text = "这张图片是包含文字的完整学术论文页面。请忽略正文文字，自动定位到页面中的图表（如散点图、直方图或箱线图），提取该图表的全部数据并重构为无障碍语义结构。"
+        user_text = f"This image is a full academic paper page containing text and figures. Please ignore the body text, locate the chart (such as a scatterplot, histogram, line graph, or boxplot), extract all of its data, and reconstruct it into an accessible semantic structure. Output all textual descriptions and table headers in {language}."
 
     # 判断 API Key 的类型
     is_gemini_key = api_key and (api_key.startswith("AQ.") or api_key.startswith("AIza"))
