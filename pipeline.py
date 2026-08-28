@@ -85,22 +85,33 @@ Please analyze the academic chart and output a JSON object in the following form
         
         from tenacity import retry, stop_after_attempt, wait_exponential
         
-        @retry(
-            stop=stop_after_attempt(5),
-            wait=wait_exponential(multiplier=2, min=2, max=15),
-            reraise=True
-        )
-        def _call_gemini_with_retry():
-            return client.models.generate_content(
-                model='gemini-flash-latest',
-                contents=[user_text, image],
-                config=dict(
-                    system_instruction=system_prompt,
-                    response_mime_type="application/json"
-                )
+        def _call_gemini_model_with_retry(model_name):
+            @retry(
+                stop=stop_after_attempt(3),
+                wait=wait_exponential(multiplier=2, min=2, max=10),
+                reraise=True
             )
+            def _inner():
+                return client.models.generate_content(
+                    model=model_name,
+                    contents=[user_text, image],
+                    config=dict(
+                        system_instruction=system_prompt,
+                        response_mime_type="application/json"
+                    )
+                )
+            return _inner()
             
-        response = _call_gemini_with_retry()
+        try:
+            # 1st attempt: Try stable gemini-flash-latest
+            response = _call_gemini_model_with_retry('gemini-flash-latest')
+        except Exception as e:
+            try:
+                # 2nd attempt (fallback): Try lighter gemini-flash-lite-latest under high load
+                response = _call_gemini_model_with_retry('gemini-flash-lite-latest')
+            except Exception:
+                raise e
+                
         return json.loads(response.text)
     else:
         client = OpenAI(api_key=api_key)
