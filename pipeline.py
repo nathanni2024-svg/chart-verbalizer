@@ -75,36 +75,106 @@ import hashlib
 
 CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".cache")
 
-def get_image_hash(image_bytes):
-    return hashlib.md5(image_bytes).hexdigest()
+def get_image_dhash(image_bytes):
+    """计算图像的知觉哈希（Difference Hash, dHash）"""
+    try:
+        img = Image.open(io.BytesIO(image_bytes))
+        # 缩放到 9x8 并转换为灰度图
+        img_gray = img.convert('L').resize((9, 8), Image.Resampling.LANCZOS)
+        pixels = list(img_gray.getdata())
+        
+        diff = []
+        for row in range(8):
+            for col in range(8):
+                pixel_left = pixels[row * 9 + col]
+                pixel_right = pixels[row * 9 + col + 1]
+                diff.append(pixel_left > pixel_right)
+                
+        # 转换为 16 位十六进制字符串
+        decimal_val = 0
+        hash_str = ""
+        for index, val in enumerate(diff):
+            if val:
+                decimal_val += 2**(index % 8)
+            if index % 8 == 7:
+                hash_str += f"{decimal_val:02x}"
+                decimal_val = 0
+        return hash_str
+    except Exception:
+        return ""
 
-def get_cached_result(img_hash, language):
+def hamming_distance(hash1, hash2):
+    """计算两个十六进制 dHash 之间的汉明距离（不同位数的个数）"""
+    try:
+        h1 = int(hash1, 16)
+        h2 = int(hash2, 16)
+        return bin(h1 ^ h2).count('1')
+    except Exception:
+        return 999
+
+def get_cached_result(image_bytes, language):
+    """使用 MD5（精确匹配）与 dHash 汉明距离（结构相似匹配）查找缓存"""
     if not os.path.exists(CACHE_DIR):
         os.makedirs(CACHE_DIR)
-    cache_path = os.path.join(CACHE_DIR, f"{img_hash}_{language}.json")
-    if os.path.exists(cache_path):
+        
+    img_hash = hashlib.md5(image_bytes).hexdigest()
+    
+    # 1. 精确匹配：文件存在则直接返回
+    exact_cache_path = os.path.join(CACHE_DIR, f"{img_hash}_{language}.json")
+    if os.path.exists(exact_cache_path):
         try:
-            with open(cache_path, "r", encoding="utf-8") as f:
-                return json.load(f)
+            with open(exact_cache_path, "r", encoding="utf-8") as f:
+                return json.load(f)["data"]
         except Exception:
             pass
+            
+    # 2. 相似度匹配：扫描缓存目录进行 dHash 对比
+    new_dhash = get_image_dhash(image_bytes)
+    if not new_dhash:
+        return None
+        
+    for filename in os.listdir(CACHE_DIR):
+        if filename.endswith(f"_{language}.json"):
+            cache_path = os.path.join(CACHE_DIR, filename)
+            try:
+                with open(cache_path, "r", encoding="utf-8") as f:
+                    entry = json.load(f)
+                cached_dhash = entry.get("dhash", "")
+                if cached_dhash:
+                    dist = hamming_distance(new_dhash, cached_dhash)
+                    # 汉明距离 <= 6 认为图表结构高度相似 (64位哈希中只有不到10%不同)
+                    if dist <= 6:
+                        # 复用结果，并为当前新图片写入精确缓存以提高下次加载效率
+                        save_cache_result(image_bytes, language, entry["data"])
+                        return entry["data"]
+            except Exception:
+                continue
     return None
 
-def save_cache_result(img_hash, language, data):
+def save_cache_result(image_bytes, language, data):
+    """保存结果到缓存，写入 MD5 与 dHash"""
     if not os.path.exists(CACHE_DIR):
         os.makedirs(CACHE_DIR)
+        
+    img_hash = hashlib.md5(image_bytes).hexdigest()
+    dhash = get_image_dhash(image_bytes)
+    
     cache_path = os.path.join(CACHE_DIR, f"{img_hash}_{language}.json")
+    cache_entry = {
+        "md5": img_hash,
+        "dhash": dhash,
+        "data": data
+    }
     try:
         with open(cache_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+            json.dump(cache_entry, f, ensure_ascii=False, indent=2)
     except Exception:
         pass
 
 def analyze_chart_accessibility(image_bytes, is_full_page=False, language="简体中文"):
     """调用大模型（OpenAI GPT-4o 或 Google Gemini 2.5 Flash）提取学术图表的无障碍要素与数据表格"""
-    # 检查本地缓存以提升分析速度
-    img_hash = get_image_hash(image_bytes)
-    cached_data = get_cached_result(img_hash, language)
+    # 1. 检查本地缓存以提升分析速度（支持精准匹配与结构感知匹配）
+    cached_data = get_cached_result(image_bytes, language)
     if cached_data:
         return cached_data
 
@@ -163,7 +233,7 @@ Please analyze the academic chart and output a JSON object in the following form
                 raise e
                 
         result_data = json.loads(response.text)
-        save_cache_result(img_hash, language, result_data)
+        save_cache_result(image_bytes, language, result_data)
         return result_data
     else:
         client = OpenAI(api_key=api_key)
@@ -191,7 +261,7 @@ Please analyze the academic chart and output a JSON object in the following form
             
         response = _call_openai_with_retry()
         result_data = json.loads(response.choices[0].message.content)
-        save_cache_result(img_hash, language, result_data)
+        save_cache_result(image_bytes, language, result_data)
         return result_data
 
 def create_accessible_docx(processed_charts):
