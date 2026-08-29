@@ -203,32 +203,58 @@ Please analyze the academic chart and output a JSON object in the following form
         client = genai.Client(api_key=api_key)
         image = Image.open(io.BytesIO(image_bytes))
         
-        from tenacity import retry, stop_after_attempt, wait_exponential
+        import re
+        import time
         
-        def _call_gemini_model_with_retry(model_name):
-            @retry(
-                stop=stop_after_attempt(3),
-                wait=wait_exponential(multiplier=2, min=2, max=10),
-                reraise=True
-            )
-            def _inner():
-                return client.models.generate_content(
-                    model=model_name,
-                    contents=[user_text, image],
-                    config=dict(
-                        system_instruction=system_prompt,
-                        response_mime_type="application/json"
+        def _call_gemini_model_with_dynamic_retry(model_name):
+            max_attempts = 4
+            for attempt in range(max_attempts):
+                try:
+                    return client.models.generate_content(
+                        model=model_name,
+                        contents=[user_text, image],
+                        config=dict(
+                            system_instruction=system_prompt,
+                            response_mime_type="application/json"
+                        )
                     )
+                except Exception as e:
+                    err_str = str(e)
+                    # Check if it's a 429 rate limit or RESOURCE_EXHAUSTED error
+                    if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
+                        # Extract the exact retry delay requested by Gemini
+                        match = re.search(r"retry in (\d+\.?\d*)s", err_str, re.IGNORECASE)
+                        if match:
+                            delay = float(match.group(1))
+                            # Add a small buffer of 1.5 seconds to be safe
+                            time.sleep(delay + 1.5)
+                            continue
+                        else:
+                            time.sleep(8 * (attempt + 1))
+                            continue
+                    # Check if it's a 503 unavailable error
+                    elif "503" in err_str or "UNAVAILABLE" in err_str:
+                        time.sleep(5 * (attempt + 1))
+                        continue
+                    else:
+                        raise e
+            # Last resort attempt
+            return client.models.generate_content(
+                model=model_name,
+                contents=[user_text, image],
+                config=dict(
+                    system_instruction=system_prompt,
+                    response_mime_type="application/json"
                 )
-            return _inner()
+            )
             
         try:
             # 1st attempt: Try stable gemini-flash-latest
-            response = _call_gemini_model_with_retry('gemini-flash-latest')
+            response = _call_gemini_model_with_dynamic_retry('gemini-flash-latest')
         except Exception as e:
             try:
                 # 2nd attempt (fallback): Try lighter gemini-flash-lite-latest under high load
-                response = _call_gemini_model_with_retry('gemini-flash-lite-latest')
+                response = _call_gemini_model_with_dynamic_retry('gemini-flash-lite-latest')
             except Exception:
                 raise e
                 
