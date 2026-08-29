@@ -9,12 +9,17 @@ from google import genai
 from docx import Document
 from docx.shared import Inches, Pt, RGBColor
 
-def extract_images_from_pdf(pdf_bytes):
-    """从上传的 PDF 字节流中提取所有图片（含矢量图页面渲染）"""
+def extract_images_from_pdf(pdf_bytes, start_page=1, end_page=None):
+    """从上传的 PDF 字节流中提取指定范围内的所有图片（含矢量图页面渲染）"""
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     extracted_images = []
     
-    for page_idx, page in enumerate(doc):
+    total_pages = len(doc)
+    if end_page is None or end_page > total_pages:
+        end_page = total_pages
+        
+    for page_idx in range(start_page - 1, end_page):
+        page = doc[page_idx]
         # 1. 尝试提取内嵌的位图图片
         image_list = page.get_images(full=True)
         page_has_raster = False
@@ -66,8 +71,43 @@ def extract_images_from_pdf(pdf_bytes):
                 
     return extracted_images
 
+import hashlib
+
+CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".cache")
+
+def get_image_hash(image_bytes):
+    return hashlib.md5(image_bytes).hexdigest()
+
+def get_cached_result(img_hash, language):
+    if not os.path.exists(CACHE_DIR):
+        os.makedirs(CACHE_DIR)
+    cache_path = os.path.join(CACHE_DIR, f"{img_hash}_{language}.json")
+    if os.path.exists(cache_path):
+        try:
+            with open(cache_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return None
+
+def save_cache_result(img_hash, language, data):
+    if not os.path.exists(CACHE_DIR):
+        os.makedirs(CACHE_DIR)
+    cache_path = os.path.join(CACHE_DIR, f"{img_hash}_{language}.json")
+    try:
+        with open(cache_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
 def analyze_chart_accessibility(image_bytes, is_full_page=False, language="简体中文"):
     """调用大模型（OpenAI GPT-4o 或 Google Gemini 2.5 Flash）提取学术图表的无障碍要素与数据表格"""
+    # 检查本地缓存以提升分析速度
+    img_hash = get_image_hash(image_bytes)
+    cached_data = get_cached_result(img_hash, language)
+    if cached_data:
+        return cached_data
+
     api_key = os.environ.get("OPENAI_API_KEY")
     
     system_prompt = f"""You are a digital accessibility and information architecture expert. 
@@ -122,7 +162,9 @@ Please analyze the academic chart and output a JSON object in the following form
             except Exception:
                 raise e
                 
-        return json.loads(response.text)
+        result_data = json.loads(response.text)
+        save_cache_result(img_hash, language, result_data)
+        return result_data
     else:
         client = OpenAI(api_key=api_key)
         base64_img = base64.b64encode(image_bytes).decode('utf-8')
@@ -148,7 +190,9 @@ Please analyze the academic chart and output a JSON object in the following form
             )
             
         response = _call_openai_with_retry()
-        return json.loads(response.choices[0].message.content)
+        result_data = json.loads(response.choices[0].message.content)
+        save_cache_result(img_hash, language, result_data)
+        return result_data
 
 def create_accessible_docx(processed_charts):
     """构建符合无障碍规范的 Word 文档"""

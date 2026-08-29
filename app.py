@@ -205,13 +205,28 @@ else:
 uploaded_file = st.file_uploader(u["uploader_label"], type=["pdf"])
 
 if uploaded_file:
+    import fitz
+    pdf_bytes = uploaded_file.read()
+    try:
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        total_pages = len(doc)
+    except Exception:
+        total_pages = 1
+        
+    start_page, end_page = 1, total_pages
+    if total_pages > 1:
+        label_total = f"📄 Total Pages: {total_pages}" if language != "简体中文" else f"📄 文档总页数: {total_pages}"
+        label_slider = "Select Page Range to Scan" if language != "简体中文" else "选择要扫描的页码范围"
+        st.info(label_total)
+        page_range = st.slider(label_slider, 1, total_pages, (1, total_pages))
+        start_page, end_page = page_range
+
     if st.button(u["btn_start"]):
         if not api_key:
             st.error(u["err_no_key"])
             st.stop()
         with st.spinner(u["spin_pdf"]):
-            pdf_bytes = uploaded_file.read()
-            images = extract_images_from_pdf(pdf_bytes)
+            images = extract_images_from_pdf(pdf_bytes, start_page=start_page, end_page=end_page)
             
         if not images:
             st.warning(u["warn_no_charts"])
