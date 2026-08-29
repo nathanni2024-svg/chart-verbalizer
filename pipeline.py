@@ -27,11 +27,21 @@ def extract_images_from_pdf(pdf_bytes):
             
             image = Image.open(io.BytesIO(image_bytes))
             if image.width > 150 and image.height > 150:
+                # CMYK/Palette modes must be converted to RGB before saving to PNG
+                if image.mode in ("CMYK", "P"):
+                    img_to_save = image.convert("RGB")
+                else:
+                    img_to_save = image
+                
+                png_stream = io.BytesIO()
+                img_to_save.save(png_stream, format="PNG")
+                png_bytes = png_stream.getvalue()
+                
                 extracted_images.append({
                     "page": page_idx + 1,
                     "index": img_idx + 1,
-                    "bytes": image_bytes,
-                    "format": image_ext,
+                    "bytes": png_bytes,
+                    "format": "png",
                     "image_obj": image,
                     "is_full_page": False
                 })
