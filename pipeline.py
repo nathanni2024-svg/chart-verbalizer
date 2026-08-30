@@ -249,12 +249,12 @@ Please analyze the academic chart and output a JSON object in the following form
             )
             
         try:
-            # 1st attempt: Try stable gemini-1.5-flash (1500 RPD daily limit)
-            response = _call_gemini_model_with_dynamic_retry('gemini-1.5-flash')
+            # 1st attempt: Try stable gemini-2.5-flash (Standard model with high quota)
+            response = _call_gemini_model_with_dynamic_retry('gemini-2.5-flash')
         except Exception as e:
             try:
-                # 2nd attempt (fallback): Try gemini-1.5-flash-lite (high quota)
-                response = _call_gemini_model_with_dynamic_retry('gemini-1.5-flash-lite')
+                # 2nd attempt (fallback): Try gemini-2.5-flash-lite (high quota)
+                response = _call_gemini_model_with_dynamic_retry('gemini-2.5-flash-lite')
             except Exception:
                 try:
                     # 3rd attempt (fallback): Try gemini-flash-latest (dynamic routing)
