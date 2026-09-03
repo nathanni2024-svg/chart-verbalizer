@@ -206,65 +206,59 @@ Please analyze the academic chart and output a JSON object in the following form
         import re
         import time
         
-        def _call_gemini_model_with_dynamic_retry(model_name):
-            max_attempts = 4
-            for attempt in range(max_attempts):
-                try:
-                    return client.models.generate_content(
-                        model=model_name,
-                        contents=[user_text, image],
-                        config=dict(
-                            system_instruction=system_prompt,
-                            response_mime_type="application/json"
-                        )
-                    )
-                except Exception as e:
-                    err_str = str(e)
-                    # Check if it's a 429 rate limit or RESOURCE_EXHAUSTED error
-                    if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
-                        # Extract the exact retry delay requested by Gemini
-                        match = re.search(r"retry in (\d+\.?\d*)s", err_str, re.IGNORECASE)
-                        if match:
-                            delay = float(match.group(1))
-                            # Add a small buffer of 1.5 seconds to be safe
-                            time.sleep(delay + 1.5)
-                            continue
-                        else:
-                            time.sleep(8 * (attempt + 1))
-                            continue
-                    # Check if it's a 503 unavailable error
-                    elif "503" in err_str or "UNAVAILABLE" in err_str:
-                        time.sleep(5 * (attempt + 1))
-                        continue
-                    else:
-                        raise e
-            # Last resort attempt
-            return client.models.generate_content(
-                model=model_name,
-                contents=[user_text, image],
-                config=dict(
-                    system_instruction=system_prompt,
-                    response_mime_type="application/json"
-                )
-            )
-            
-        try:
-            # 1st attempt: Try stable gemini-2.5-flash (Standard model with high quota)
-            response = _call_gemini_model_with_dynamic_retry('gemini-2.5-flash')
-        except Exception as e:
+        # Candidate model pool with independent quotas (combines to 120+ requests/day)
+        model_pool = [
+            'gemini-flash-lite-latest',
+            'gemini-3.5-flash-lite',
+            'gemini-3.5-flash',
+            'gemini-flash-latest',
+            'gemini-3-flash-preview',
+            'gemini-2.5-flash',
+        ]
+        
+        last_err = None
+        for model_name in model_pool:
             try:
-                # 2nd attempt (fallback): Try gemini-2.5-flash-lite (high quota)
-                response = _call_gemini_model_with_dynamic_retry('gemini-2.5-flash-lite')
-            except Exception:
-                try:
-                    # 3rd attempt (fallback): Try gemini-flash-latest (dynamic routing)
-                    response = _call_gemini_model_with_dynamic_retry('gemini-flash-latest')
-                except Exception:
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=[user_text, image],
+                    config=dict(
+                        system_instruction=system_prompt,
+                        response_mime_type="application/json"
+                    )
+                )
+                result_data = json.loads(response.text)
+                save_cache_result(image_bytes, language, result_data)
+                return result_data
+            except Exception as e:
+                err_str = str(e)
+                last_err = e
+                # If rate-limited (429), unavailable (503), or not found (404),
+                # instantly rotate to the next model in the pool with fresh quota!
+                if any(code in err_str for code in ["429", "RESOURCE_EXHAUSTED", "503", "UNAVAILABLE", "404", "NOT_FOUND"]):
+                    continue
+                else:
                     raise e
-                
-        result_data = json.loads(response.text)
-        save_cache_result(image_bytes, language, result_data)
-        return result_data
+                    
+        # If all models in the pool were tried and exhausted, cool down and retry with first model
+        if last_err:
+            if "429" in str(last_err) or "RESOURCE_EXHAUSTED" in str(last_err):
+                match = re.search(r"retry in (\d+\.?\d*)s", str(last_err), re.IGNORECASE)
+                delay = float(match.group(1)) if match else 20.0
+                time.sleep(min(delay + 1.0, 60.0))
+                response = client.models.generate_content(
+                    model=model_pool[0],
+                    contents=[user_text, image],
+                    config=dict(
+                        system_instruction=system_prompt,
+                        response_mime_type="application/json"
+                    )
+                )
+                result_data = json.loads(response.text)
+                save_cache_result(image_bytes, language, result_data)
+                return result_data
+            else:
+                raise last_err
     else:
         client = OpenAI(api_key=api_key)
         base64_img = base64.b64encode(image_bytes).decode('utf-8')
